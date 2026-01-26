@@ -13,7 +13,6 @@ import os
 
 
 def get_connection():
-    print( 'HITTING', os.getenv("dbname") )
     connection = psycopg2.connect(
         dbname= os.getenv("dbname"),          # your database name
         user= os.getenv("user") ,         # your PostgreSQL username
