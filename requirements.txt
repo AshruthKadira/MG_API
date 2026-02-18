@@ -1,0 +1,12 @@
+psycopg2
+pytesseract
+openai
+easyocr
+Pillow
+numpy
+opencv-python
+python-dotenv
+Flask
+fuzzywuzzy
+python-Levenshtein
+requests
