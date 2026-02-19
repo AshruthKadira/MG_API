@@ -1,3 +1,10 @@
+flask
 psycopg2
-pytesseract
-openai
+psycopg2-binary
+ollama
+python-dotenv
+numpy==1.26.4
+paddlepaddle==3.2.2
+paddleocr
+opencv-python-headless
+Pillow
