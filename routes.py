@@ -1,13 +1,11 @@
 # server/routes.py
 from flask import Blueprint, request, jsonify
 from utils import change_content, transform_values_and_keys, stringify_keys_but_keep_values, normalize_transaction
-from tesUtils import clean_phonepe_transaction
 from db_config import get_connection
-import pytesseract
-from PIL import Image
-import openai
+from utils import ReceiptParser, callAzureOCR
+
 import io
-import json
+
 
 routes = Blueprint('routes', __name__)
 
@@ -36,13 +34,13 @@ def home():
             normalized_tx = normalize_transaction(tx)
             cur.execute("""
                 INSERT INTO transactions (
-                    status, date_of_transaction, reciever_name, banking_name,
+                    status, date_of_transaction, receiver_name, banking_name,
                     message, transaction_number, sent_from, utr,
-                    reciever_phone_number, amount, upi_method
+                    receiver_phone_number, amount, upi_method
                 ) VALUES (
-                    %(status)s, %(date_of_transaction)s, %(reciever_name)s, %(banking_name)s,
+                    %(status)s, %(date_of_transaction)s, %(receiver_name)s, %(banking_name)s,
                     %(message)s, %(transaction_number)s, %(sent_from)s, %(utr)s,
-                    %(reciever_phone_number)s, %(amount)s, %(upi_method)s
+                    %(receiver_phone_number)s, %(amount)s, %(upi_method)s
                 )
             """, normalized_tx)
 
@@ -61,38 +59,56 @@ def home():
         if 'conn' in locals():
             conn.close()
 
-@routes.route('/get-images', methods =['POST'])
-def image_route():
-    print("Headers:", request.headers)
-    print("Form Data:", request.form)
+@routes.route("/extract-receipt", methods=["POST"])
+def extract_receipt():
+
+    image = request.data
+
+    if not image:
+        return jsonify({"error": "No image uploaded"}), 400
+
     try:
-        # Get raw bytes
-        image_bytes = request.data  
+        azure_json = callAzureOCR(image)
 
-        # Convert to PIL Image
-        image = Image.open(io.BytesIO(image_bytes))
+        # Defensive check
+        if not azure_json or "analyzeResult" not in azure_json:
+            return jsonify({"error": "Invalid OCR response"}), 500
 
-        custom_config = r'-c tessedit_char_whitelist=0123456789₹., --psm 6'
+        parser = ReceiptParser(azure_json)
+        result = parser.parse()
 
-        # Extract text with dimensions
-        data = pytesseract.image_to_data(
-            image,
-            output_type=pytesseract.Output.DICT
-        )
-
-        results = []
-        for i in range(len(data['text'])):
-            if data['text'][i].strip():  # ignore empty text
-                results.append({
-                    "text": data['text'][i],
-                    "x": data['left'][i],
-                    "y": data['top'][i],
-                    "w": data['width'][i],
-                    "h": data['height'][i]
-                })
-        cleaned_data = clean_phonepe_transaction(results)
-        print(cleaned_data, 'OCR RESULTS')
-        return {"ocr_results": cleaned_data}
+        # Normalize the transaction data for database insertion
+        normalized_tx = normalize_transaction(result)
+        
+        # Insert into database
+        conn = get_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            INSERT INTO transactions (
+                date_of_transaction, receiver_name, receiver_bank,
+                message, transaction_number, sent_from, utr,
+                receiver_phone_number, amount, upi_method
+            ) VALUES (
+                %(date_of_transaction)s, %(receiver_name)s, %(receiver_bank)s,
+                %(message)s, %(transaction_number)s, %(sent_from)s, %(utr)s,
+                %(receiver_phone_number)s, %(amount)s, %(upi_method)s
+            )
+        """, normalized_tx)
+        
+        conn.commit()
+        
+        return jsonify({
+            "message": "Receipt data extracted and stored successfully",
+            "data": result,
+            "confidence": result.get("confidence", 1)
+        }), 200
 
     except Exception as e:
-        return {"error": str(e)}
+        return jsonify({"error": str(e)}), 500
+    
+    finally:
+        if 'cur' in locals():
+            cur.close()
+        if 'conn' in locals():
+            conn.close()
