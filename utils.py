@@ -5,6 +5,97 @@ import os
 
 import requests
 
+def normalize_transaction(tx):
+    """
+    Ensure that all keys required for DB insert exist, even if missing.
+    Fill missing ones with None.
+    Also process date_of_transaction into proper date + time.
+    Clean and convert amount properly.
+    """
+    required_fields = [
+        "status", "date_of_transaction", "receiver_name", "receiver_bank",
+        "message", "transaction_number", "sent_from", "utr",
+        "receiver_phone_number", "amount", "upi_method"
+    ]
+    normalized = {}
+
+    # --- Handle date_of_transaction specially ---
+    raw_date = tx.get("date_of_transaction")
+    if raw_date:
+        # Check if date is already in the correct format (from ReceiptParser)
+        if re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', str(raw_date)):
+            # Already in YYYY-MM-DD HH:MM:SS format
+            normalized["date_of_transaction"] = raw_date
+        else:
+            # Old format, try to parse it
+            try:
+                formatted_date, formatted_time = process_transaction_date(raw_date)
+                normalized["date_of_transaction"] = formatted_date
+            except Exception:
+                # if parsing fails, keep original string
+                normalized["date_of_transaction"] = raw_date
+    else:
+        normalized["date_of_transaction"] = None
+
+    # --- Handle other fields ---
+    for field in required_fields:
+        if field == "date_of_transaction":
+            continue
+
+        val = tx.get(field)
+
+        # Clean up "amount"
+        if field == "amount" and val is not None:
+            if isinstance(val, str):
+                cleaned = val.strip().replace(",", "")
+                # remove leading currency symbols like ₹ $ €
+                cleaned = re.sub(r'^[^\d\-\.]+', '', cleaned)
+                try:
+                    val = float(cleaned)
+                except Exception:
+                    val = None
+            elif isinstance(val, (int, float)):
+                val = float(val)
+            else:
+                val = None
+
+        normalized[field] = val
+    
+    print(normalized, 'normalized')
+    return normalized
+
+
+def stringify_keys_but_keep_values(data_list):
+    fixed = []
+    for doc in data_list:
+        new_doc = {}
+        for k, v in doc.items():
+            new_doc[str(k)] = v  # Convert key to string, leave value unchanged
+        fixed.append(new_doc)
+    return fixed
+
+
+
+def process_transaction_date(date_str: str):
+    """
+    Converts a transaction date string like
+    '02 : 10 pm on 01 Mar 2025' into:
+      - date_of_transaction: 'dd/mm/yyyy'
+      - time: 'HH:MM' (24-hr format)
+    """
+
+    # Normalize string (remove spaces around :)
+    date_str = date_str.replace(" : ", ":").strip()
+
+    # Example format: "02:10 pm on 01 Mar 2025"
+    dt = datetime.strptime(date_str, "%I:%M %p on %d %b %Y")
+
+    # Convert to desired formats
+    formatted_date = dt.strftime("%d/%m/%Y")  # dd/mm/yyyy
+    formatted_time = dt.strftime("%H:%M")     # 24 hr time
+
+    return formatted_date, formatted_time
+
 def get_lines(azure_json):
     lines = []
     read_results = azure_json["analyzeResult"]["readResults"]
@@ -107,7 +198,7 @@ class ReceiptParser:
         - date → date_of_transaction
         - receiver_name → receiver_name
         - receiver_phone → receiver_phone_number
-        - receiver_bank → banking_name
+        - receiver_bank → receiver_bank
         - receiver_upi → upi_method
         - transaction_id → transaction_number
         """
@@ -118,7 +209,7 @@ class ReceiptParser:
             "amount": None,
             "upi_method": None,
             "receiver_phone_number": None,
-            "banking_name": None,
+            "receiver_bank": None,
             "message": None,
             "transaction_number": None,
             "sent_from": None,
@@ -173,12 +264,12 @@ class ReceiptParser:
             if text.lower().startswith("banking na") and i + 1 < len(self.lines):
                 candidate = self.lines[i + 1]
                 if len(candidate) >= 3:
-                    data["banking_name"] = candidate
+                    data["receiver_bank"] = candidate
 
             if text.lower() == "sent to" and i + 1 < len(self.lines):
                 bank_line = self.lines[i + 1].replace(":", "").strip()
                 if len(bank_line) >= 3:
-                    data["banking_name"] = bank_line
+                    data["receiver_bank"] = bank_line
 
             # Extract message
             if text.lower().startswith("message") and i + 1 < len(self.lines):
