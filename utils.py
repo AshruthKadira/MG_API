@@ -1,230 +1,233 @@
-import json
-import ast
-import re
 from datetime import datetime
+import re
+import time
+import os
 
-def change_content(x):
-    cleaned_str = x.replace('}{', '},{')
-    
-    try:
-        dict_list = json.loads(f"[{cleaned_str}]")
-    except json.JSONDecodeError:
-        try:
-            dict_list = [ast.literal_eval(item + "}") for item in cleaned_str.strip('{}').split('},{')]
-        except Exception as e:
-            return {"error": f"Failed to parse data: {str(e)}"}, 400
+import requests
 
-    new_list = []
-    for d in dict_list:
-        new_dict = {}
-        for k, v in d.items():
+def get_lines(azure_json):
+    lines = []
+    read_results = azure_json["analyzeResult"]["readResults"]
+
+    for page in read_results:
+        for line in page["lines"]:
+            lines.append(line["text"].strip())
+
+    return lines
+
+
+def callAzureOCR(image):
+
+    azure_endpoint = os.getenv("azure_endpoint")
+    azure_key = os.getenv("azure_key")
+    analyze_url = f"{azure_endpoint}/vision/v3.2/read/analyze"
+
+    headers = {
+        "Ocp-Apim-Subscription-Key": azure_key,
+        "Content-Type": "application/octet-stream"
+    }
+
+    response = requests.post(analyze_url, headers=headers, data=image)
+
+    if response.status_code != 202:
+        raise Exception(f"OCR request failed: {response.text}")
+
+    operation_url = response.headers["Operation-Location"]
+
+    while True:
+        result_response = requests.get(
+            operation_url,
+            headers={"Ocp-Apim-Subscription-Key": azure_key}
+        )
+
+        result_json = result_response.json()
+        status = result_json.get("status")
+
+        if status == "succeeded":
+            return result_json
+        elif status == "failed":
+            raise Exception("OCR processing failed")
+
+        time.sleep(1)
+
+
+
+class ReceiptParser:
+
+    RUPEE_PATTERN = r'₹\s?\d+(?:,\d+)*(?:\.\d+)?'
+    PHONE_PATTERN = r'(?:\+91[-\s]?)?[6-9]\d{9}'
+    UPI_PATTERN = r'[Xx]+\d*@\w+'
+    UTR_PATTERN = r'UTR[:\s]*([\d]+)'
+    TXN_PATTERN = r'^T\d{10,}'
+
+    def __init__(self, azure_json):
+        self.lines = self._flatten_lines(azure_json)
+
+    def _flatten_lines(self, azure_json):
+        lines = []
+        read_results = azure_json["analyzeResult"]["readResults"]
+        for page in read_results:
+            for line in page["lines"]:
+                text = line["text"].strip()
+                if text:
+                    lines.append(text)
+        return lines
+
+    # ✅ NEW: Normalize amount
+    def _normalize_amount(self, amount_str):
+        if not amount_str:
+            return None
+        cleaned = re.sub(r"[^\d.]", "", amount_str)
+        return int(float(cleaned))
+
+    # ✅ NEW: Normalize date
+    def _normalize_date(self, date_str):
+        if not date_str:
+            return None
+
+        possible_formats = [
+            "%I:%M %p on %d %b %Y",
+            "%I:%M %p %d %b %Y",
+            "%d %b %Y %I:%M %p",
+        ]
+
+        for fmt in possible_formats:
             try:
-                new_key = int(k)
+                dt = datetime.strptime(date_str.strip(), fmt)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
             except ValueError:
-                new_key = k
-            new_dict[new_key] = v
-        new_list.append(new_dict)
-
-    return new_list
-
-
-def transform_values_and_keys(dict_list):
-    print(dict_list, 'before transformation')
-    transformed = []
-    date_pattern = re.compile(
-        r'''(?ix)
-        (
-            \d{1,2}:\d{2}
-            \s?[ap]\.?m\.?
-            \s?(on)?\s?
-            \d{1,2}\s?[A-Za-z]{3,}
-            \s?\d{4}
-        )
-        |
-        (
-            \d{1,2}\s+[A-Za-z]+
-            \s+\d{4}
-            \s+at\s+ 
-            \d{1,2}:\d{2}
-            \s?[APap]\.?M\.?
-        )
-        '''
-    )
-
-    for d in dict_list:
-        new_dict = {}
-        amountAlreadyDefined = False        
-        items = list(d.items())
-
-        for i, (k, v) in enumerate(items):
-            if isinstance(v, str) and v.isdigit():
-                v = int(v)
-
-            if k == 1:
-                new_dict['status'] = v
                 continue
 
-            if isinstance(v, str) and date_pattern.match(v.strip()):
-                new_dict['date_of_transaction'] = v.strip()
-                continue
+        return date_str  # fallback if unknown format
 
-            if isinstance(v, str) and v.startswith("Paid to"):
-                # Case 1: "Paid to John Doe"
-                parts = v.split("Paid to", 1)
-                if len(parts) > 1 and parts[1].strip():
-                    new_dict['reciever_name'] = parts[1].strip()
-                # Case 2: Separate key-value style (Paid to → Name)
-                elif k + 1 in d:
-                    new_dict['reciever_name'] = d[k + 1]
-                continue
+    def parse(self):
+        """
+        Parse receipt and return data with database-compatible field names.
+        Maps semantic fields to database schema:
+        - date → date_of_transaction
+        - receiver_name → receiver_name
+        - receiver_phone → receiver_phone_number
+        - receiver_bank → banking_name
+        - receiver_upi → upi_method
+        - transaction_id → transaction_number
+        """
+        data = {
+            "status": None,
+            "date_of_transaction": None,
+            "receiver_name": None,
+            "amount": None,
+            "upi_method": None,
+            "receiver_phone_number": None,
+            "banking_name": None,
+            "message": None,
+            "transaction_number": None,
+            "sent_from": None,
+            "utr": None,
+            "confidence": 1
+        }
 
-            if isinstance(v, str) and 'Banking Name :' in v:
-                new_dict['banking_name'] = v.split('Banking Name :')[-1].strip()
-                continue
+        amounts_found = []
 
-            if isinstance(v, str) and 'Message' in v:
-                new_dict['message'] = v.split('Message')[-1].strip(':').strip()
-                continue
+        for i, text in enumerate(self.lines):
 
-            if isinstance(v, str) and v.startswith('T25'):
-                new_dict['transaction_number'] = v
-                continue
+            # Extract status and date
+            if "Transaction Successful" in text:
+                data["status"] = "Successful"
+                if i + 1 < len(self.lines):
+                    raw_date = self.lines[i + 1]
+                    data["date_of_transaction"] = self._normalize_date(raw_date)
 
-            if isinstance(v, str) and v.startswith('XXXX'):
-                new_dict['sent_from'] = v
-                continue
+            # Extract receiver name and related info
+            if text.lower() == "paid to" and i + 1 < len(self.lines):
 
-            if isinstance(v, str) and v.startswith('UTR:'):
-                new_dict['utr'] = v[5:]
-                continue
+                name_line = self.lines[i + 1]
 
-            # Phone number logic (international and 10-digit)
-            if isinstance(v, str):
-                cleaned_v = re.sub(r'[^\d+]', '', v)
-                try:
-                    if cleaned_v.startswith('+') and len(re.sub(r'\D', '', cleaned_v)) >= 10:
-                        digits_only = re.sub(r'\D', '', cleaned_v)
-                        phone_num = int(digits_only[-10:])
-                        new_dict['reciever_phone_number'] = phone_num
-                        continue
-                    elif cleaned_v.isdigit() and len(cleaned_v) == 10:
-                        new_dict['reciever_phone_number'] = int(cleaned_v)
-                        continue
-                except:
-                    new_dict[k] = v
-                    continue
+                rupee_match = re.search(self.RUPEE_PATTERN, name_line)
+                if rupee_match:
+                    raw_amount = rupee_match.group()
+                    amounts_found.append(raw_amount)
+                    data["amount"] = self._normalize_amount(raw_amount)
+                    name_line = name_line.split("₹")[0].strip()
 
+                data["receiver_name"] = name_line
 
-            if isinstance(v, str) and v.startswith(('₽', '€', '$', '₴', '3', '7', '2')) and "," in v:
-                print(v, 'v', str, 'str')
-                try:
-                    value_num = float(v[1:]) if v[1:].replace('.', '', 1).isdigit() else v[1:]
-                    new_dict['amount'] = value_num
-                    amountAlreadyDefined = True
-                except:
-                    new_dict[k] = v
-                continue
+                if i + 2 < len(self.lines):
+                    unknown1 = self.lines[i + 2]
 
-            elif isinstance(v, (int, float)) and (amountAlreadyDefined == False):
-                print(v, 'v', str, 'str')
-                new_dict['amount'] = float(str(v)[1:])
-                continue
+                    rupee_match2 = re.search(self.RUPEE_PATTERN, unknown1)
+                    if rupee_match2:
+                        raw_amount = rupee_match2.group()
+                        amounts_found.append(raw_amount)
+                        data["amount"] = self._normalize_amount(raw_amount)
 
-            new_dict[k] = v
+                    elif re.search(self.UPI_PATTERN, unknown1):
+                        data["upi_method"] = unknown1
 
-        # Add UPI Method
-        if new_dict.get('status') == 'Transaction Successful':
-            new_dict['upi_method'] = 'PhonePe'
-        else:
-            new_dict['upi_method'] = 'Unknown'
+                    elif re.search(self.PHONE_PATTERN, unknown1):
+                        data["receiver_phone_number"] = unknown1
 
-        transformed.append(new_dict)
+                    elif not unknown1.startswith("+") and not unknown1.upper().startswith("X"):
+                        data["receiver_name"] += " " + unknown1
 
-    return transformed
+            # Extract banking name
+            if text.lower().startswith("banking na") and i + 1 < len(self.lines):
+                candidate = self.lines[i + 1]
+                if len(candidate) >= 3:
+                    data["banking_name"] = candidate
 
-def normalize_transaction(tx):
-    """
-    Ensure that all keys required for DB insert exist, even if missing.
-    Fill missing ones with None.
-    Also process date_of_transaction into proper date + time.
-    Clean and convert amount properly.
-    """
-    required_fields = [
-        "status", "date_of_transaction", "time", "reciever_name", "banking_name",
-        "message", "transaction_number", "sent_from", "utr",
-        "reciever_phone_number", "amount", "upi_method"
-    ]
-    normalized = {}
+            if text.lower() == "sent to" and i + 1 < len(self.lines):
+                bank_line = self.lines[i + 1].replace(":", "").strip()
+                if len(bank_line) >= 3:
+                    data["banking_name"] = bank_line
 
-    # --- Handle date_of_transaction specially ---
-    raw_date = tx.get("date_of_transaction")
-    if raw_date:
-        try:
-            formatted_date, formatted_time = process_transaction_date(raw_date)
-            normalized["date_of_transaction"] = formatted_date
-            normalized["time"] = formatted_time
-        except Exception:
-            # if parsing fails, keep original string and null time
-            normalized["date_of_transaction"] = raw_date
-            normalized["time"] = None
-    else:
-        normalized["date_of_transaction"] = None
-        normalized["time"] = None
+            # Extract message
+            if text.lower().startswith("message") and i + 1 < len(self.lines):
+                data["message"] = self.lines[i + 1]
 
-    # --- Handle other fields ---
-    for field in required_fields:
-        if field in ("date_of_transaction", "time"):
-            continue
+            # Extract transaction number
+            if text.lower() == "transaction id" and i + 1 < len(self.lines):
+                data["transaction_number"] = self.lines[i + 1]
 
-        val = tx.get(field)
+            if re.match(self.TXN_PATTERN, text):
+                data["transaction_number"] = text
 
-        # Clean up "amount"
-        if field == "amount" and val is not None:
-            if isinstance(val, str):
-                cleaned = val.strip().replace(",", "")
-                # remove leading currency symbols like ₹ $ €
-                cleaned = re.sub(r'^[^\d\-\.]+', '', cleaned)
-                try:
-                    val = float(cleaned)
-                except Exception:
-                    val = None
-            elif isinstance(val, (int, float)):
-                val = float(val)
-            else:
-                val = None
+            # Extract UTR
+            utr_match = re.search(self.UTR_PATTERN, text)
+            if utr_match:
+                data["utr"] = utr_match.group(1)
 
-        normalized[field] = val
-    print(normalized, 'normal')
-    return normalized
+            # Extract sent_from (account pattern like XXXXXXXXXXXI132)
+            if re.match(r'^X{4,}\d+$', text):
+                data["sent_from"] = text
 
+            # Collect all amounts
+            amount_match = re.search(self.RUPEE_PATTERN, text)
+            if amount_match:
+                amounts_found.append(amount_match.group())
 
-def stringify_keys_but_keep_values(data_list):
-    fixed = []
-    for doc in data_list:
-        new_doc = {}
-        for k, v in doc.items():
-            new_doc[str(k)] = v  # Convert key to string, leave value unchanged
-        fixed.append(new_doc)
-    return fixed
+            # Extract phone number
+            phone_match = re.search(self.PHONE_PATTERN, text)
+            if phone_match:
+                phone = re.sub(r'\D', '', phone_match.group())
 
+                if len(phone) == 10:
+                    phone = "+91" + phone
+                elif len(phone) == 12 and phone.startswith("91"):
+                    phone = "+" + phone
 
+                data["receiver_phone_number"] = phone
 
-def process_transaction_date(date_str: str):
-    """
-    Converts a transaction date string like
-    '02 : 10 pm on 01 Mar 2025' into:
-      - date_of_transaction: 'dd/mm/yyyy'
-      - time: 'HH:MM' (24-hr format)
-    """
+        # Handle amount if not yet set
+        unique_amounts = list(set(amounts_found))
 
-    # Normalize string (remove spaces around :)
-    date_str = date_str.replace(" : ", ":").strip()
+        if not data["amount"] and unique_amounts:
+            data["amount"] = self._normalize_amount(unique_amounts[0])
 
-    # Example format: "02:10 pm on 01 Mar 2025"
-    dt = datetime.strptime(date_str, "%I:%M %p on %d %b %Y")
+        if len(unique_amounts) > 1:
+            data["confidence"] = 0
 
-    # Convert to desired formats
-    formatted_date = dt.strftime("%d/%m/%Y")  # dd/mm/yyyy
-    formatted_time = dt.strftime("%H:%M")     # 24 hr time
+        # Set default status if not found
+        if not data["status"]:
+            data["status"] = "Successful"
 
-    return formatted_date, formatted_time
+        return data
