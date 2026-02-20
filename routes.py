@@ -56,7 +56,7 @@ def extract_receipt():
         
         return jsonify({
             "message": "Receipt data extracted and stored successfully",
-            "data": result,
+            "data": normalized_tx,
             "confidence": result.get("confidence", 1)
         }), 200
 

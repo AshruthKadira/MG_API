@@ -6,64 +6,41 @@ import os
 import requests
 
 def normalize_transaction(tx):
-    """
-    Ensure that all keys required for DB insert exist, even if missing.
-    Fill missing ones with None.
-    Also process date_of_transaction into proper date + time.
-    Clean and convert amount properly.
-    """
     required_fields = [
         "status", "date_of_transaction", "receiver_name", "receiver_bank",
         "message", "transaction_number", "sent_from", "utr",
-        "receiver_phone_number", "amount", "upi_method"
+        "receiver_phone_number", "amount", "upi_method", "confidence"
     ]
+
     normalized = {}
 
-    # --- Handle date_of_transaction specially ---
+    # --- Date ---
     raw_date = tx.get("date_of_transaction")
+
     if raw_date:
-        # Check if date is already in the correct format (from ReceiptParser)
-        if re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', str(raw_date)):
-            # Already in YYYY-MM-DD HH:MM:SS format
+        if isinstance(raw_date, str) and re.match(r'\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', raw_date):
             normalized["date_of_transaction"] = raw_date
         else:
-            # Old format, try to parse it
-            try:
-                formatted_date, formatted_time = process_transaction_date(raw_date)
-                normalized["date_of_transaction"] = formatted_date
-            except Exception:
-                # if parsing fails, keep original string
-                normalized["date_of_transaction"] = raw_date
+            normalized["date_of_transaction"] = None
     else:
         normalized["date_of_transaction"] = None
 
-    # --- Handle other fields ---
+    # --- Other fields ---
     for field in required_fields:
         if field == "date_of_transaction":
             continue
 
         val = tx.get(field)
 
-        # Clean up "amount"
         if field == "amount" and val is not None:
-            if isinstance(val, str):
-                cleaned = val.strip().replace(",", "")
-                # remove leading currency symbols like ₹ $ €
-                cleaned = re.sub(r'^[^\d\-\.]+', '', cleaned)
-                try:
-                    val = float(cleaned)
-                except Exception:
-                    val = None
-            elif isinstance(val, (int, float)):
+            try:
                 val = float(val)
-            else:
+            except Exception:
                 val = None
 
         normalized[field] = val
-    
-    print(normalized, 'normalized')
-    return normalized
 
+    return normalized
 
 def stringify_keys_but_keep_values(data_list):
     fixed = []
@@ -125,7 +102,14 @@ def callAzureOCR(image):
 
     operation_url = response.headers["Operation-Location"]
 
+    timeout = 30  # seconds
+    start_time = time.time()
+
     while True:
+
+        if time.time() - start_time > timeout:
+            raise Exception("OCR polling timeout")
+
         result_response = requests.get(
             operation_url,
             headers={"Ocp-Apim-Subscription-Key": azure_key}
@@ -140,7 +124,6 @@ def callAzureOCR(image):
             raise Exception("OCR processing failed")
 
         time.sleep(1)
-
 
 
 class ReceiptParser:
