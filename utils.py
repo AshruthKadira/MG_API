@@ -37,6 +37,31 @@ def normalize_transaction(tx):
                 val = float(val)
             except Exception:
                 val = None
+        
+        # Normalize phone number to ensure +91 prefix
+        if field == "receiver_phone_number" and val is not None:
+            # Remove all non-digit characters
+            phone_digits = re.sub(r'\D', '', str(val))
+            
+            if phone_digits:
+                if len(phone_digits) == 10:
+                    # 10 digits: add +91
+                    val = "+91" + phone_digits
+                elif len(phone_digits) == 11 and phone_digits.startswith("0"):
+                    # 11 digits starting with 0: remove 0 and add +91
+                    val = "+91" + phone_digits[1:]
+                elif len(phone_digits) == 12 and phone_digits.startswith("91"):
+                    # 12 digits starting with 91: add +
+                    val = "+" + phone_digits
+                elif len(phone_digits) == 13 and phone_digits.startswith("91"):
+                    # 13 digits starting with 91: add +
+                    val = "+" + phone_digits
+                elif len(phone_digits) > 10:
+                    # Other cases: take last 10 digits and add +91
+                    val = "+91" + phone_digits[-10:]
+                else:
+                    # Less than 10 digits: set to None
+                    val = None
 
         normalized[field] = val
 
@@ -282,14 +307,31 @@ class ReceiptParser:
             # Extract phone number
             phone_match = re.search(self.PHONE_PATTERN, text)
             if phone_match:
+                # Remove all non-digit characters
                 phone = re.sub(r'\D', '', phone_match.group())
-
+                
+                # Normalize to +91 format
                 if len(phone) == 10:
+                    # 10 digits: add +91
                     phone = "+91" + phone
+                elif len(phone) == 11 and phone.startswith("0"):
+                    # 11 digits starting with 0: remove 0 and add +91
+                    phone = "+91" + phone[1:]
                 elif len(phone) == 12 and phone.startswith("91"):
+                    # 12 digits starting with 91: add +
                     phone = "+" + phone
-
-                data["receiver_phone_number"] = phone
+                elif len(phone) == 13 and phone.startswith("91"):
+                    # 13 digits starting with 91: add +
+                    phone = "+" + phone
+                elif len(phone) > 10:
+                    # Other cases: take last 10 digits and add +91
+                    phone = "+91" + phone[-10:]
+                else:
+                    # Less than 10 digits: skip
+                    phone = None
+                
+                if phone:
+                    data["receiver_phone_number"] = phone
 
         # Handle amount if not yet set
         unique_amounts = list(set(amounts_found))
