@@ -46,7 +46,7 @@ def extract_receipt():
         normalized_tx['created_at'] = datetime.now()
         
         cur.execute("""
-            INSERT INTO transactions (
+            INSERT INTO transactions_live (
                 date_of_transaction, receiver_name, receiver_bank,
                 message, transaction_number, sent_from, utr,
                 receiver_phone_number, amount, upi_method, confidence, created_at
