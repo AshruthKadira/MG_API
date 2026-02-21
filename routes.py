@@ -36,19 +36,24 @@ def extract_receipt():
         # Normalize the transaction data for database insertion
         normalized_tx = normalize_transaction(result)
         print(normalized_tx)
+        
         # Insert into database
         conn = get_connection()
         cur = conn.cursor()
+        
+        # Add created_at timestamp
+        from datetime import datetime
+        normalized_tx['created_at'] = datetime.now()
         
         cur.execute("""
             INSERT INTO transactions (
                 date_of_transaction, receiver_name, receiver_bank,
                 message, transaction_number, sent_from, utr,
-                receiver_phone_number, amount, upi_method, confidence
+                receiver_phone_number, amount, upi_method, confidence, created_at
             ) VALUES (
                 %(date_of_transaction)s, %(receiver_name)s, %(receiver_bank)s,
                 %(message)s, %(transaction_number)s, %(sent_from)s, %(utr)s,
-                %(receiver_phone_number)s, %(amount)s, %(upi_method)s, %(confidence)s
+                %(receiver_phone_number)s, %(amount)s, %(upi_method)s, %(confidence)s, %(created_at)s
             )
         """, normalized_tx)
         
