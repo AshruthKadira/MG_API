@@ -154,7 +154,7 @@ def callAzureOCR(image):
 class ReceiptParser:
 
     RUPEE_PATTERN = r'₹\s?\d+(?:,\d+)*(?:\.\d+)?'
-    PHONE_PATTERN = r'(?:\+91[-\s]?)?[6-9]\d{9}'
+    PHONE_PATTERN = r'^(?:\+91[-\s]?)?[6-9]\d{9}$'
     UPI_PATTERN = r'[Xx]+\d*@\w+'
     UTR_PATTERN = r'UTR[:\s]*([\d]+)'
     TXN_PATTERN = r'^T\d{10,}'
@@ -305,7 +305,7 @@ class ReceiptParser:
                 amounts_found.append(amount_match.group())
 
             # Extract phone number
-            phone_match = re.search(self.PHONE_PATTERN, text)
+            phone_match = re.match(self.PHONE_PATTERN, text.strip())
             if phone_match:
 
                 phone_digits = re.sub(r'\D', '', phone_match.group())
