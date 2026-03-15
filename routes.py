@@ -47,23 +47,23 @@ def extract_receipt():
         conn = get_connection()
         cur = conn.cursor()
         
-        # # Add created_at timestamp
-        # from datetime import datetime
-        # normalized_tx['created_at'] = datetime.now()
+        # Add created_at timestamp
+        from datetime import datetime
+        normalized_tx['created_at'] = datetime.now()
         
-        # cur.execute("""
-        #     INSERT INTO transactions_live (
-        #         date_of_transaction, receiver_name, receiver_bank,
-        #         message, transaction_number, sent_from, utr,
-        #         receiver_phone_number, amount, upi_method, confidence, created_at
-        #     ) VALUES (
-        #         %(date_of_transaction)s, %(receiver_name)s, %(receiver_bank)s,
-        #         %(message)s, %(transaction_number)s, %(sent_from)s, %(utr)s,
-        #         %(receiver_phone_number)s, %(amount)s, %(upi_method)s, %(confidence)s, %(created_at)s
-        #     )
-        # """, normalized_tx)
+        cur.execute("""
+            INSERT INTO transactions_live (
+                date_of_transaction, receiver_name, receiver_bank,
+                message, transaction_number, sent_from, utr,
+                receiver_phone_number, amount, upi_method, confidence, created_at
+            ) VALUES (
+                %(date_of_transaction)s, %(receiver_name)s, %(receiver_bank)s,
+                %(message)s, %(transaction_number)s, %(sent_from)s, %(utr)s,
+                %(receiver_phone_number)s, %(amount)s, %(upi_method)s, %(confidence)s, %(created_at)s
+            )
+        """, normalized_tx)
         
-        # conn.commit()
+        conn.commit()
         
         return jsonify({
             "message": "Receipt data extracted and stored successfully",
