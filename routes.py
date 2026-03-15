@@ -2,7 +2,7 @@
 from flask import Blueprint, request, jsonify
 from utils import  normalize_transaction
 from db_config import get_connection
-from utils import ReceiptParser, callAzureOCR
+from utils import  callAzureOCR, receiptClassifier,redirectReceipt
 
 import io
 
@@ -29,10 +29,16 @@ def extract_receipt():
         # Defensive check
         if not azure_json or "analyzeResult" not in azure_json:
             return jsonify({"error": "Invalid OCR response"}), 500
+        
+        classifyRecepit = receiptClassifier(azure_json) 
 
-        parser = ReceiptParser(azure_json)
+        if classifyRecepit is 'unknown':
+             return jsonify({"error": "Invalid OCR response"}), 500
+        
+        # print(classifyRecepit, 'CHECK PAYMENT MODE HERE')
+        parser = redirectReceipt(azure_json,classifyRecepit)
         result = parser.parse()
-
+        # print(result, 'res')
         # Normalize the transaction data for database insertion
         normalized_tx = normalize_transaction(result)
         print(normalized_tx)
@@ -65,6 +71,12 @@ def extract_receipt():
             "confidence": result.get("confidence", 1)
         }), 200
 
+        # return jsonify({
+        #     "message": "Receipt data extracted and stored successfully",
+        #     "data": classifyRecepit,
+        #     # "confidence": result.get("confidence", 1)
+        # }), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     
@@ -73,3 +85,7 @@ def extract_receipt():
             cur.close()
         if 'conn' in locals():
             conn.close()
+
+
+
+    

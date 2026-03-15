@@ -150,8 +150,274 @@ def callAzureOCR(image):
 
         time.sleep(1)
 
+def receiptClassifier(azure_json):
 
-class ReceiptParser:
+    for page in azure_json.get("analyzeResult", {}).get("readResults", []):
+        for line in page.get("lines", []):
+
+            line_text = line.get("text", "").strip()
+
+            # Google Pay tick
+            if line_text == "L":
+                return "googlepay"
+
+            # Axis detection
+            if "Payment Complete" in line_text:
+                return "axis"
+
+            # PhonePe detection
+            if "पे" in line_text:
+                return "phonepe"
+
+            for word in line.get("words", []):
+
+                word_text = word.get("text", "")
+
+                if word_text == "L":
+                    return "googlepay"
+
+                if word_text == "पे":
+                    return "phonepe"
+
+    return "unknown"
+
+def redirectReceipt(azure_json, mode_of_receipt):
+    if mode_of_receipt is 'phonepe':
+        return phonepeReceiptParser(azure_json)
+    if mode_of_receipt is 'googlepay':
+        return gpayReceiptParser(azure_json)
+    if mode_of_receipt is 'axis':
+        return axisReceiptParser(azure_json)
+    
+
+
+class axisReceiptParser:
+
+    AMOUNT_PATTERN = r'\d{1,3}(?:,\d{3})*(?:\.\d+)?'
+
+    def __init__(self, azure_json):
+        self.lines = self._flatten_lines(azure_json)
+
+    def _flatten_lines(self, azure_json):
+        lines = []
+        for page in azure_json["analyzeResult"]["readResults"]:
+            for line in page["lines"]:
+                txt = line["text"].strip()
+                if txt:
+                    lines.append(txt)
+        return lines
+
+    def _normalize_amount(self, amt):
+        cleaned = re.sub(r"[^\d.]", "", amt)
+        return int(float(cleaned))
+
+    def _normalize_date(self, date_str):
+        dt = datetime.strptime(date_str, "%d/%m/%Y")
+        return dt.strftime("%Y-%m-%d 00:00:00")
+
+    def parse(self):
+
+        data = {
+            "status": "Successful",
+            "date_of_transaction": None,
+            "receiver_name": None,
+            "amount": None,
+            "upi_method": 'axis',
+            "receiver_phone_number": None,
+            "receiver_bank": None,
+            "message": None,
+            "transaction_number": None,
+            "sent_from": None,
+            "utr": None,
+            "confidence": 1
+        }
+
+        # ---------- Receiver ----------
+        for i, text in enumerate(self.lines):
+
+            if text.upper() == "SENT TO":
+
+                name_parts = []
+                j = i + 1
+
+                while j < len(self.lines):
+
+                    nxt = self.lines[j]
+
+                    if "XXXX" in nxt or "AMOUNT" in nxt:
+                        break
+
+                    name_parts.append(nxt)
+                    j += 1
+
+                if name_parts:
+                    data["receiver_name"] = " ".join(name_parts)
+
+        # ---------- Amount ----------
+        for text in self.lines:
+
+            if re.fullmatch(self.AMOUNT_PATTERN, text):
+                data["amount"] = self._normalize_amount(text)
+                break
+
+        # ---------- Message ----------
+        for i, text in enumerate(self.lines):
+
+            if text.upper().startswith("REMARKS"):
+
+                msg = []
+
+                if i+1 < len(self.lines):
+                    msg.append(self.lines[i+1])
+
+                if i+2 < len(self.lines):
+                    msg.append(self.lines[i+2])
+
+                data["message"] = " ".join(msg)
+
+        # ---------- Sent From ----------
+        for i, text in enumerate(self.lines):
+
+            if text.upper() == "SENT FROM" and i+1 < len(self.lines):
+                data["sent_from"] = self.lines[i+1]
+
+        # ---------- Receipt Number ----------
+        for text in self.lines:
+
+            if text.startswith("RECEIPT NO"):
+                data["transaction_number"] = text.split(":")[-1].strip()
+
+        # ---------- RRN ----------
+        for i, text in enumerate(self.lines):
+
+            if text.startswith("RRN") and i+1 < len(self.lines):
+                data["utr"] = self.lines[i+1]
+
+        # ---------- Date ----------
+        for i, text in enumerate(self.lines):
+
+            if text.startswith("DATE") and i+1 < len(self.lines):
+                data["date_of_transaction"] = self._normalize_date(self.lines[i+1])
+
+        return data
+
+class gpayReceiptParser:
+
+    RUPEE_PATTERN = r'₹\s?\d+(?:,\d+)*(?:\.\d+)?'
+    PHONE_PATTERN = r'^(?:\+91[-\s]?)?[6-9]\d{9}$'
+    UPI_PATTERN = r'[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}'
+    
+    def __init__(self, azure_json):
+        self.lines = self._flatten_lines(azure_json)
+
+    def _flatten_lines(self, azure_json):
+        lines = []
+        read_results = azure_json["analyzeResult"]["readResults"]
+
+        for page in read_results:
+            for line in page["lines"]:
+                text = line["text"].strip()
+                if text:
+                    lines.append(text)
+
+        return lines
+
+
+    def _normalize_amount(self, amount_str):
+        cleaned = re.sub(r"[^\d.]", "", amount_str)
+        return int(float(cleaned))
+
+
+    def _normalize_date(self, date_str):
+
+        date_str = date_str.replace(",", "")
+
+        formats = [
+            "%d %B %Y %I:%M %p",
+            "%d %b %Y %I:%M %p",
+        ]
+
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                return dt.strftime("%Y-%m-%d %H:%M:%S")
+            except:
+                pass
+
+        return date_str
+
+
+    def parse(self):
+
+        data = {
+            "status": "Successful",
+            "date_of_transaction": None,
+            "receiver_name": None,
+            "amount": None,
+            "upi_method": 'googlepay',
+            "receiver_phone_number": None,
+            "receiver_bank": None,
+            "message": None,
+            "transaction_number": None,
+            "sent_from": None,
+            "utr": None,
+            "confidence": 1
+        }
+
+        amounts_found = []
+
+        for i, text in enumerate(self.lines):
+
+            # ---------- Amount ----------
+            amt = re.search(self.RUPEE_PATTERN, text)
+            if amt:
+                raw = amt.group()
+                amounts_found.append(raw)
+                if not data["amount"]:
+                    data["amount"] = self._normalize_amount(raw)
+
+
+            # ---------- Paid To ----------
+            if text.lower() == "paid to" and i + 1 < len(self.lines):
+
+                data["receiver_name"] = self.lines[i+1]
+
+                if i + 2 < len(self.lines):
+
+                    next_line = self.lines[i+2]
+
+                    # Extract UPI
+                    upi = re.search(self.UPI_PATTERN, next_line)
+                    if upi:
+                        # data["upi_method"] = upi.group()
+
+                        phone = re.search(r'\d{10}', upi.group())
+                        if phone:
+                            data["receiver_phone_number"] = "+91" + phone.group()
+
+                    # Extract phone
+                    phone = re.search(r'\d{10}', next_line)
+                    if phone:
+                        data["receiver_phone_number"] = "+91" + phone.group()
+
+
+            # ---------- Date ----------
+            if re.search(r'\d{1,2}\s+\w+\s+20\d{2}', text):
+
+                cleaned = text.replace(",", "")
+                data["date_of_transaction"] = self._normalize_date(cleaned)
+
+
+        # -------- Confidence check --------
+        unique_amounts = list(set(amounts_found))
+
+        if len(unique_amounts) > 1:
+            data["confidence"] = 0
+        # print(data, 'here is object')
+        return data
+    
+
+class phonepeReceiptParser:
 
     RUPEE_PATTERN = r'₹\s?\d+(?:,\d+)*(?:\.\d+)?'
     PHONE_PATTERN = r'^(?:\+91[-\s]?)?[6-9]\d{9}$'
@@ -215,7 +481,7 @@ class ReceiptParser:
             "date_of_transaction": None,
             "receiver_name": None,
             "amount": None,
-            "upi_method": None,
+            "upi_method": 'phonepe',
             "receiver_phone_number": None,
             "receiver_bank": None,
             "message": None,
@@ -259,8 +525,8 @@ class ReceiptParser:
                         amounts_found.append(raw_amount)
                         data["amount"] = self._normalize_amount(raw_amount)
 
-                    elif re.search(self.UPI_PATTERN, unknown1):
-                        data["upi_method"] = unknown1
+                    # elif re.search(self.UPI_PATTERN, unknown1):
+                        # data["upi_method"] = unknown1
 
                     elif re.search(self.PHONE_PATTERN, unknown1):
                         data["receiver_phone_number"] = unknown1
