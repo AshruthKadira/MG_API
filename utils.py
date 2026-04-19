@@ -4,6 +4,22 @@ import time
 import os
 
 import requests
+from flask import request, jsonify
+
+
+
+API_KEY = os.getenv("api_key")
+
+def api_key_middleware():
+
+    client_key = request.headers.get("x-api-key")
+
+    if not client_key:
+        return jsonify({"error": "API key missing"}), 401
+
+    if client_key != API_KEY:
+        return jsonify({"error": "Invalid API key"}), 403
+
 
 def normalize_transaction(tx):
     required_fields = [
@@ -182,11 +198,11 @@ def receiptClassifier(azure_json):
     return "unknown"
 
 def redirectReceipt(azure_json, mode_of_receipt):
-    if mode_of_receipt is 'phonepe':
+    if mode_of_receipt == 'phonepe':
         return phonepeReceiptParser(azure_json)
-    if mode_of_receipt is 'googlepay':
+    if mode_of_receipt == 'googlepay':
         return gpayReceiptParser(azure_json)
-    if mode_of_receipt is 'axis':
+    if mode_of_receipt == 'axis':
         return axisReceiptParser(azure_json)
     
 
@@ -563,7 +579,7 @@ class phonepeReceiptParser:
 
             # Extract sent_from (account pattern like XXXXXXXXXXXI132)
             if re.match(r'^X{4,}\d+$', text):
-                data["sent_from"] = text
+                data["sent_from"] = text[-8:]
 
             # Collect all amounts
             amount_match = re.search(self.RUPEE_PATTERN, text)
