@@ -2,18 +2,23 @@
 from flask import Blueprint, request, jsonify
 from utils import  normalize_transaction
 from db_config import get_connection
-from utils import  callAzureOCR, receiptClassifier,redirectReceipt
+from utils import  callAzureOCR, receiptClassifier,redirectReceipt, api_key_middleware
 
-import io
 
 
 routes = Blueprint('routes', __name__)
+
+@routes.before_request
+def auth_check():
+    return api_key_middleware()
+
 
 @routes.route('/', methods=['POST'])
 def home():
         return jsonify({
         "message": "APP IS LIVE",
         }), 200
+
 
 @routes.route("/extract-receipt", methods=["POST"])
 def extract_receipt():
@@ -32,7 +37,7 @@ def extract_receipt():
         
         classifyRecepit = receiptClassifier(azure_json) 
 
-        if classifyRecepit is 'unknown':
+        if classifyRecepit == 'unknown':
              return jsonify({"error": "Invalid OCR response"}), 500
         
         # print(classifyRecepit, 'CHECK PAYMENT MODE HERE')
